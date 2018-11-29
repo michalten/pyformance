@@ -2,7 +2,7 @@ import functools
 import re
 import time
 import sys
-from .meters import Counter, Histogram, Meter, Timer, Gauge, CallbackGauge, SimpleGauge
+from .meters import Counter, Histogram, Meter, Timer, Gauge, CallbackGauge, SimpleGauge, BaseMetric
 
 
 class MetricsRegistry(object):
@@ -24,7 +24,7 @@ class MetricsRegistry(object):
         self._gauges = {}
         self._clock = clock
 
-    def add(self, key, metric):
+    def add(self, key, metric, tags=None):
         """
         Use this method to manually add custom metric instances to the registry
         which are not created with their constructor's default arguments,
@@ -33,6 +33,9 @@ class MetricsRegistry(object):
         :param key: name of the metric
         :type key: C{str}
         :param metric: instance of Histogram, Meter, Gauge, Timer or Counter
+        :param tags: tags attached to the metric (e.g. {'region': 'us-west-1'})
+        :type tags: C{dict}
+
         """
         class_map = (
            (Histogram, self._histograms),
@@ -43,9 +46,10 @@ class MetricsRegistry(object):
         )
         for cls, registry in class_map:
             if isinstance(metric, cls):
-                if key in registry:
+                metric_key = BaseMetric(key, tags)
+                if metric_key in registry:
                     raise LookupError("Metric %r already registered" % key)
-                registry[key] = metric
+                registry[metric_key] = metric
                 return
         raise TypeError("Invalid class. Could not register metric %r" % key)
 
@@ -61,9 +65,10 @@ class MetricsRegistry(object):
 
         :return: L{Counter}
         """
-        if key not in self._counters:
-            self._counters[key] = Counter(tags=tags)
-        return self._counters[key]
+        metric_key = BaseMetric(key, tags)
+        if metric_key not in self._counters:
+            self._counters[metric_key] = Counter(key=key, tags=tags)
+        return self._counters[metric_key]
 
     def histogram(self, key, tags=None):
         """
@@ -77,21 +82,25 @@ class MetricsRegistry(object):
 
         :return: L{Histogram}
         """
-        if key not in self._histograms:
-            self._histograms[key] = Histogram(clock=self._clock, tags=tags)
-        return self._histograms[key]
+        metric_key = BaseMetric(key, tags)
+        if metric_key not in self._histograms:
+            self._histograms[metric_key] = Histogram(key=key, clock=self._clock, tags=tags)
+        return self._histograms[metric_key]
 
     def gauge(self, key, gauge=None, default=float("nan"), tags=None):
-        if key not in self._gauges:
+        metric_key = BaseMetric(key, tags)
+        if metric_key not in self._gauges:
             if gauge is None:
                 gauge = SimpleGauge(
-                    default, tags)  # raise TypeError("gauge required for registering")
+                    key=key,
+                    value=default,
+                    tags=tags)  # raise TypeError("gauge required for registering")
             elif not isinstance(gauge, Gauge):
                 if not callable(gauge):
                     raise TypeError("gauge getter not callable")
-                gauge = CallbackGauge(gauge, tags)
-            self._gauges[key] = gauge
-        return self._gauges[key]
+                gauge = CallbackGauge(key=key, callback=gauge, tags=tags)
+            self._gauges[metric_key] = gauge
+        return self._gauges[metric_key]
 
     def meter(self, key, tags=None):
         """
@@ -105,9 +114,10 @@ class MetricsRegistry(object):
 
         :return: L{Meter}
         """
-        if key not in self._meters:
-            self._meters[key] = Meter(clock=self._clock, tags=tags)
-        return self._meters[key]
+        metric_key = BaseMetric(key, tags)
+        if metric_key not in self._meters:
+            self._meters[metric_key] = Meter(key=key, clock=self._clock, tags=tags)
+        return self._meters[metric_key]
 
     def create_sink(self):
         return None
@@ -124,9 +134,15 @@ class MetricsRegistry(object):
 
         :return: L{Timer}
         """
-        if key not in self._timers:
-            self._timers[key] = Timer(clock=self._clock, sink=self.create_sink(), tags=tags)
-        return self._timers[key]
+        metric_key = BaseMetric(key, tags)
+        if metric_key not in self._timers:
+            self._timers[metric_key] = Timer(
+                key=key,
+                clock=self._clock,
+                sink=self.create_sink(),
+                tags=tags
+            )
+        return self._timers[metric_key]
 
     def clear(self):
         self._meters.clear()
@@ -135,25 +151,23 @@ class MetricsRegistry(object):
         self._timers.clear()
         self._histograms.clear()
 
-    def _get_counter_metrics(self, key):
-        if key in self._counters:
-            counter = self._counters[key]
+    def _get_counter_metrics(self, metric_key):
+        if metric_key in self._counters:
+            counter = self._counters[metric_key]
             results = {"count": counter.get_count()}
-            _add_metric_tags_to_metrics(counter, results)
             return results
         return {}
 
-    def _get_gauge_metrics(self, key):
-        if key in self._gauges:
-            gauge = self._gauges[key]
+    def _get_gauge_metrics(self, metric_key):
+        if metric_key in self._gauges:
+            gauge = self._gauges[metric_key]
             result = {"value": gauge.get_value()}
-            _add_metric_tags_to_metrics(gauge, result)
             return result
         return {}
 
-    def _get_histogram_metrics(self, key):
-        if key in self._histograms:
-            histogram = self._histograms[key]
+    def _get_histogram_metrics(self, metric_key):
+        if metric_key in self._histograms:
+            histogram = self._histograms[metric_key]
             snapshot = histogram.get_snapshot()
             res = {"avg": snapshot.get_mean(),
                    "count": histogram.get_count(),
@@ -164,25 +178,23 @@ class MetricsRegistry(object):
                    "95_percentile": snapshot.get_95th_percentile(),
                    "99_percentile": snapshot.get_99th_percentile(),
                    "999_percentile": snapshot.get_999th_percentile()}
-            _add_metric_tags_to_metrics(histogram, res)
             return res
         return {}
 
-    def _get_meter_metrics(self, key):
-        if key in self._meters:
-            meter = self._meters[key]
+    def _get_meter_metrics(self, metric_key):
+        if metric_key in self._meters:
+            meter = self._meters[metric_key]
             res = {"count": meter.get_count(),
                    "15m_rate": meter.get_fifteen_minute_rate(),
                    "5m_rate": meter.get_five_minute_rate(),
                    "1m_rate": meter.get_one_minute_rate(),
                    "mean_rate": meter.get_mean_rate()}
-            _add_metric_tags_to_metrics(meter, res)
             return res
         return {}
 
-    def _get_timer_metrics(self, key):
-        if key in self._timers:
-            timer = self._timers[key]
+    def _get_timer_metrics(self, metric_key):
+        if metric_key in self._timers:
+            timer = self._timers[metric_key]
             snapshot = timer.get_snapshot()
             res = {"avg": timer.get_mean(),
                    "sum": timer.get_sum(),
@@ -199,29 +211,37 @@ class MetricsRegistry(object):
                    "95_percentile": snapshot.get_95th_percentile(),
                    "99_percentile": snapshot.get_99th_percentile(),
                    "999_percentile": snapshot.get_999th_percentile()}
-            _add_metric_tags_to_metrics(timer, res)
             return res
         return {}
 
-    def get_metrics(self, key):
+    def get_metrics(self, key, tags=None):
         """
         Gets all the metrics for a specified key.
 
         :param key: name of the metric
         :type key: C{str}
 
+        :param tags: tags attached to the metric (e.g. {'region': 'us-west-1'})
+        :type tags: C{dict}
+
         :return: C{dict}
         """
+        return self._get_metrics_by_metric_key(BaseMetric(key, tags))
+
+    def _get_metrics_by_metric_key(self, metric_key):
         metrics = {}
         for getter in (self._get_counter_metrics, self._get_histogram_metrics,
                        self._get_meter_metrics, self._get_timer_metrics,
                        self._get_gauge_metrics):
-            metrics.update(getter(key))
+            metrics.update(getter(metric_key))
         return metrics
 
-    def dump_metrics(self):
+    def dump_metrics(self, key_is_metric=False):
         """
         Formats all of the metrics and returns them as a dict.
+
+        :param key_is_metric: True if the resulting dict's keys are the metric objects themselves,
+        False if the keys are names only (thus effectively ignoring tags)
 
         :return: C{list} of C{dict} of metrics
         """
@@ -231,12 +251,17 @@ class MetricsRegistry(object):
                             self._meters,
                             self._timers,
                             self._gauges):
-            for key in metric_type.keys():
-                metrics[key] = self.get_metrics(key)
+            for metric_key in metric_type.keys():
+                if key_is_metric:
+                    key = metric_key
+                else:
+                    key = metric_key.get_key()
+                metrics[key] = self._get_metrics_by_metric_key(metric_key)
 
         return metrics
 
 
+# TODO make sure tags are supported properly
 class RegexRegistry(MetricsRegistry):
 
     """
@@ -396,8 +421,8 @@ def time_calls(fn):
             return fn(*args, **kwargs)
     return wrapper
 
-
-def _add_metric_tags_to_metrics(metric, metrics):
-    tags = metric.get_tags()
-    if tags:
-        metrics["tags"] = tags
+# TODO remove
+# def _add_metric_tags_to_metrics(metric, metrics):
+#     tags = metric.get_tags()
+#     if tags:
+#         metrics["tags"] = tags

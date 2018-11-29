@@ -6,7 +6,7 @@ class MeterTestCase(TimedTestCase):
 
     def setUp(self):
         super(MeterTestCase, self).setUp()
-        self.meter = Meter(TimedTestCase.clock)
+        self.meter = Meter(key="test_meter", clock=TimedTestCase.clock)
 
     def tearDown(self):
         super(MeterTestCase, self).tearDown()

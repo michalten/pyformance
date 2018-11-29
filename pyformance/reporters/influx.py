@@ -68,7 +68,7 @@ class InfluxReporter(Reporter):
         if self.autocreate_database and not self._did_create_database:
             self._create_database()
         timestamp = timestamp or int(round(self.clock.time()))
-        metrics = (registry or self.registry).dump_metrics()
+        metrics = (registry or self.registry).dump_metrics(key_is_metric=True)
         post_data = "\n".join(self._get_influx_protocol_lines(metrics, timestamp))
         url = self._get_url()
         self._try_send(url, post_data)
@@ -82,9 +82,10 @@ class InfluxReporter(Reporter):
     def _get_influx_protocol_lines(self, metrics, timestamp):
         lines = []
         for key, metric_values in metrics.items():
-            table = self._get_table_name(key)
+            metric_name = key.get_key()
+            table = self._get_table_name(metric_name)
             values = InfluxReporter._stringify_values(metric_values)
-            tags = InfluxReporter._stringify_tags(metric_values)
+            tags = InfluxReporter._stringify_tags(key)
             line = "%s%s %s %s" % (table, tags, values, timestamp)
             lines.append(line)
         return lines
@@ -95,8 +96,8 @@ class InfluxReporter(Reporter):
                          for (k, v) in iteritems(metric_values) if k != "tags"])
 
     @staticmethod
-    def _stringify_tags(metric_values):
-        tags = metric_values.get("tags", None)
+    def _stringify_tags(metric):
+        tags = metric.get_tags()
         if tags:
             return "," + ",".join(["%s=%s" % (k, _format_tag_value(v))
                                    for (k, v) in iteritems(tags)])
@@ -134,7 +135,7 @@ def _format_tag_value(value):
         return value
     else:
         # Escape special characters
-        return re.sub("([ ,=])", "\\\1", value)
+        return re.sub("([ ,=])", r"\\\1", value)
 
 
 def _encode_username(username, password):
